@@ -1,0 +1,112 @@
+*citer.txt*  Insert citations from local .bib files; fetch new ones with citer
+
+==============================================================================
+CONTENTS                                                      *citer-contents*
+
+  1. Introduction ........................................ |citer-intro|
+  2. Installation ........................................ |citer-install|
+  3. Usage ............................................... |citer-usage|
+  4. Commands ............................................ |citer-commands|
+  5. Configuration ....................................... |citer-config|
+  6. Duplicates .......................................... |citer-duplicates|
+
+==============================================================================
+1. INTRODUCTION                                                  *citer-intro*
+
+citer picks citation keys from the `*.bib` files next to the file you are
+editing (and in the vimtex project root) using a Telescope fuzzy finder over
+key, authors, title and year. Papers that aren't there yet can be fetched by
+URL, DOI or arXiv ID with the `citer` command-line tool, which downloads
+BibTeX from the publisher's or arXiv's own export endpoint.
+
+Requirements: Neovim 0.10+, telescope.nvim, and `citer` on $PATH.
+Run |:checkhealth| citer to verify.
+
+==============================================================================
+2. INSTALLATION                                                *citer-install*
+
+With vim-plug (also installs the `citer` CLI using uv): >vim
+
+  Plug 'nvim-telescope/telescope.nvim'
+  Plug 'hershkumar/citer', { 'do': 'uv tool install --reinstall .' }
+<
+The plugin calls `setup()` with defaults on its own. To configure it, call
+setup yourself after `plug#end()` (see |citer-config|).
+
+==============================================================================
+3. USAGE                                                         *citer-usage*
+
+In tex buffers:
+
+  Typing `\cite{`, `\citep{`, `\autocite[...]{` (any `\...cite...{`), or a
+  `,` inside one, opens the picker.
+
+  <C-x>c          (insert)  Open the picker.
+  <leader>ci      (normal)  Open the picker.
+  <leader>ca      (normal)  Fetch a paper by URL/DOI/arXiv ID and add it.
+
+In the picker:
+
+  <CR>            Insert the selected key(s). Outside a cite command the keys
+                  are wrapped in `\cite{}`.
+  <C-j>, <C-k>    Move down / up.
+  <Tab>           Toggle multi-selection.
+  <C-a>           Fetch a paper that isn't in the .bib yet, add it, and insert
+                  its key.
+  <Esc>, <C-c>    Close and return to where you were.
+
+==============================================================================
+4. COMMANDS                                                   *citer-commands*
+
+:CiterPick                                                        *:CiterPick*
+    Open the citation picker.
+
+:CiterAdd [{target} ...]                                           *:CiterAdd*
+    Fetch BibTeX for each URL, DOI or arXiv ID with `citer` and append it to
+    the project .bib file. Without arguments, prompts for input.
+
+:CiterDuplicates                                            *:CiterDuplicates*
+    Fill the quickfix list with entries that duplicate an earlier entry
+    across the project's .bib files.
+
+==============================================================================
+5. CONFIGURATION                                                *citer-config*
+
+Defaults: >lua
+
+  require('citer').setup({
+    cmd = "citer",            -- the citer executable
+    args = {},                -- extra arguments, e.g. { "--published" }
+    bib_file = nil,           -- always add to this file (relative to root)
+    default_bib = "references.bib",  -- suggested name if there is no .bib
+    auto_open = true,         -- open the picker on `\cite{` and `,`
+    keymaps = {
+      pick = "<leader>ci",
+      add = "<leader>ca",
+      insert_pick = "<C-x>c",
+      picker_add = "<C-a>",
+    },
+  })
+<
+Set a keymap to `""` or `false` to disable it. From vimscript, the same
+options can be given as `g:citer` before plugins load: >vim
+
+  let g:citer = { 'auto_open': 0, 'keymaps': { 'pick': '<leader>cc' } }
+<
+Where new entries go: the single .bib in the directory; otherwise the one
+named in `\bibliography{}` or `\addbibresource{}`; otherwise you are asked.
+With no .bib file you are offered `default_bib`.
+
+==============================================================================
+6. DUPLICATES                                                *citer-duplicates*
+
+Before an entry is written, it is compared with every entry in the project's
+.bib files by DOI, arXiv ID and normalized title (lowercase, letters and
+digits only). If it matches, nothing is written and the existing key is
+inserted instead. An arXiv preprint whose published version is already in
+the file counts as a duplicate when its title or DOI matches.
+
+If a different paper already uses the same key, the new entry's key gets a
+suffix: `Smith2020a`, `Smith2020b`, ...
+
+ vim:tw=78:ts=8:ft=help:norl:
