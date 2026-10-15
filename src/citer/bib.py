@@ -1,4 +1,4 @@
-"""Minimal BibTeX parsing and duplicate detection (mirrors nvim/lua/citer/bib.lua)."""
+"""Minimal BibTeX parsing, duplicate detection and appending (mirrors lua/citer/bib.lua)."""
 
 from __future__ import annotations
 
@@ -6,11 +6,14 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .ids import ARXIV_NEW_RE, ARXIV_OLD_RE
+
 SKIP_TYPES = {"comment", "string", "preamble"}
 ENTRY_START = re.compile(r"@\s*(\w+)\s*[{(]")
+ENTRY_KEY = re.compile(r"\s*([^,\s]+)\s*,")
 FIELD_NAME = re.compile(r"[\s,]*([\w\-.:]+)\s*=\s*")
-ARXIV_NEW = re.compile(r"\d{4}\.\d{4,5}")
-ARXIV_OLD = re.compile(r"[a-zA-Z\-]+(?:\.[A-Z]{2})?/\d{7}")
+# Characters that matter while looking for a closing delimiter, keyed by that delimiter.
+SCAN = {"}": re.compile(r"[{}]"), '"': re.compile(r'[{}"]'), ")": re.compile(r"[{})]")}
 
 
 @dataclass
@@ -23,46 +26,40 @@ class Entry:
     line: int = 1
 
 
-def _balanced(text: str, i: int) -> int:
-    """Index just past the brace group starting at text[i] == '{'."""
+# --- Parsing -------------------------------------------------------------------
+
+
+def _close(text: str, i: int, closer: str) -> int:
+    """Index just past the first `closer` at brace depth 0, scanning from `i`."""
     depth = 0
-    for j in range(i, len(text)):
-        if text[j] == "{":
+    for m in SCAN[closer].finditer(text, i):
+        ch = m.group()
+        if ch == closer and depth == 0:
+            return m.end()
+        if ch == "{":
             depth += 1
-        elif text[j] == "}":
+        elif ch == "}":
             depth -= 1
-            if depth == 0:
-                return j + 1
     return len(text)
 
 
 def _read_value(body: str, i: int) -> tuple[str, int]:
+    """Read the field value at `i`; returns (raw value, index after it)."""
     c = body[i : i + 1]
     if c == "{":
-        j = _balanced(body, i)
-        return body[i:j], j
-    if c == '"':
-        depth = 0
-        for j in range(i + 1, len(body)):
-            ch = body[j]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-            elif ch == '"' and depth == 0:
-                return body[i : j + 1], j + 1
-        return body[i:], len(body)
-    j = body.find(",", i)
-    j = len(body) if j < 0 else j
-    return body[i:j].strip(), j
+        j = _close(body, i + 1, "}")
+    elif c == '"':
+        j = _close(body, i + 1, '"')
+    else:  # bare value: number, month macro, concatenation
+        j = body.find(",", i)
+        j = len(body) if j < 0 else j
+        return body[i:j].strip(), j
+    return body[i:j], j
 
 
 def _parse_fields(body: str) -> list[tuple[str, str]]:
     order, i = [], 0
-    while i < len(body):
-        m = FIELD_NAME.match(body, i)
-        if not m:
-            break
+    while m := FIELD_NAME.match(body, i):
         raw, i = _read_value(body, m.end())
         order.append((m.group(1).lower(), raw))
     return order
@@ -70,28 +67,19 @@ def _parse_fields(body: str) -> list[tuple[str, str]]:
 
 def parse(text: str) -> list[Entry]:
     entries, pos = [], 0
+    line, counted = 1, 0  # line number at offset `counted`
     while m := ENTRY_START.search(text, pos):
         start, open_ = m.start(), m.end() - 1
-        if text[open_] == "{":
-            stop = _balanced(text, open_)
-        else:
-            stop = text.find(")", open_)
-            stop = len(text) if stop < 0 else stop + 1
+        stop = _close(text, open_ + 1, "}" if text[open_] == "{" else ")")
+        line += text.count("\n", counted, start)
+        counted = start
         typ = m.group(1).lower()
         if typ not in SKIP_TYPES:
             body = text[open_ + 1 : stop - 1]
-            km = re.match(r"\s*([^,\s]+)\s*,", body)
-            if km:
+            if km := ENTRY_KEY.match(body):
                 order = _parse_fields(body[km.end() :])
                 entries.append(
-                    Entry(
-                        type=typ,
-                        key=km.group(1),
-                        fields=dict(order),
-                        order=order,
-                        raw=text[start:stop],
-                        line=text.count("\n", 0, start) + 1,
-                    )
+                    Entry(typ, km.group(1), dict(order), order, text[start:stop], line)
                 )
         pos = stop
     return entries
@@ -102,6 +90,7 @@ def parse_file(path: Path) -> list[Entry]:
 
 
 def clean(raw: str | None) -> str:
+    """Strip delimiters, braces and LaTeX markup from a raw field value."""
     if not raw:
         return ""
     v = raw
@@ -136,7 +125,7 @@ def arxiv(e: Entry) -> str | None:
         if "arxiv" in v.lower():
             candidates.append(v)
     for c in candidates:
-        if m := ARXIV_NEW.search(c) or ARXIV_OLD.search(c):
+        if m := ARXIV_NEW_RE.search(c) or ARXIV_OLD_RE.search(c):
             return m.group(0)
     return None
 
@@ -173,6 +162,7 @@ class Index:
         return None
 
     def unique_key(self, key: str) -> str:
+        """`key`, or `key` plus a suffix (a..z, then _2, _3, ...) if a different entry has it."""
         if key not in self.key:
             return key
         for c in "abcdefghijklmnopqrstuvwxyz":
@@ -200,13 +190,68 @@ def entry_text(e: Entry, key: str) -> str:
     """Text to write: the source's own layout, unless it came as a single line."""
     if "\n" not in e.raw:
         return format_entry(e, key)
-    return re.sub(rf"^(@\s*\w+\s*[{{(]\s*){re.escape(e.key)}", lambda m: m.group(1) + key, e.raw, count=1)
+    head = re.compile(rf"^(@\s*\w+\s*[{{(]\s*){re.escape(e.key)}")
+    return head.sub(lambda m: m.group(1) + key, e.raw, count=1)
 
 
 def append(path: Path, chunks: list[str]) -> None:
+    """Append entries to `path`, keeping one blank line between entries."""
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     lead = ""
     if existing:
         lead = "" if existing.endswith("\n\n") else ("\n" if existing.endswith("\n") else "\n\n")
     with path.open("a", encoding="utf-8") as f:
         f.write(lead + "\n\n".join(chunks) + "\n")
+
+
+@dataclass
+class Outcome:
+    """What happened to one fetched entry: added under `key`, or skipped as a duplicate."""
+
+    added: bool
+    key: str
+    title: str
+    reason: str | None = None  # why it was skipped
+
+
+class BibFile:
+    """A .bib file plus its duplicate index, re-read only when the file changes on disk."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._stamp: tuple[int, int] | None = None
+        self._index = Index()
+
+    def _stat(self) -> tuple[int, int] | None:
+        try:
+            st = self.path.stat()
+        except FileNotFoundError:
+            return None
+        return st.st_mtime_ns, st.st_size
+
+    def index(self) -> Index:
+        if (stamp := self._stat()) != self._stamp:
+            self._index = Index(parse_file(self.path))
+            self._stamp = stamp
+        return self._index
+
+    def add(self, texts: list[str]) -> list[Outcome]:
+        """Append the entries in `texts`, skipping papers already in the file."""
+        index = self.index()
+        chunks, outcomes = [], []
+        for text in texts:
+            for e in parse(text):
+                title = clean(e.fields.get("title"))
+                if dup := index.find_duplicate(e):
+                    existing, why = dup
+                    outcomes.append(Outcome(False, existing.key, title, why))
+                    continue
+                key = index.unique_key(e.key)
+                chunks.append(entry_text(e, key))
+                e.key = key
+                index.add(e)
+                outcomes.append(Outcome(True, key, title))
+        if chunks:
+            append(self.path, chunks)
+            self._stamp = self._stat()
+        return outcomes

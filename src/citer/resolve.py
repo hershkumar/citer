@@ -7,18 +7,14 @@ from dataclasses import dataclass
 from urllib.parse import unquote, urlparse
 
 import httpx
-from bs4 import BeautifulSoup
 
-# New-style (2301.01234v2) and old-style (hep-th/9901001) arXiv identifiers.
-ARXIV_NEW = r"\d{4}\.\d{4,5}"
-ARXIV_OLD = r"[a-z\-]+(?:\.[A-Z]{2})?/\d{7}"
+from .ids import ARXIV_NEW, ARXIV_OLD, DOI_RE
+
 ARXIV_ID_RE = re.compile(rf"(?P<id>{ARXIV_NEW}|{ARXIV_OLD})(?:v\d+)?")
 ARXIV_URL_RE = re.compile(
     rf"arxiv\.org/(?:abs|pdf|html|format|bibtex)/(?P<id>{ARXIV_NEW}|{ARXIV_OLD})(?:v\d+)?",
     re.IGNORECASE,
 )
-
-DOI_RE = re.compile(r"10\.\d{4,9}/[^\s?#\"'<>]+")
 
 # Path segments publishers append after the DOI in their URLs.
 TRAILING_SEGMENTS = {
@@ -45,8 +41,14 @@ class Paper:
         u = self.landing_url or self.url
         return urlparse(u).netloc.lower() if u else ""
 
+    @property
+    def doi_prefix(self) -> str:
+        """Registrant prefix of the DOI, e.g. "10.1103"."""
+        return self.doi.split("/", 1)[0] if self.doi else ""
+
 
 def clean_doi(doi: str) -> str:
+    """Normalize a DOI taken from a URL: unquote, drop page-type suffixes and ".pdf"."""
     doi = unquote(doi).strip().rstrip(".,;)")
     parts = doi.split("/")
     # Drop trailing path segments that are page types rather than part of the DOI.
@@ -78,6 +80,8 @@ def doi_from_url(url: str) -> str | None:
 
 def doi_from_html(html: str) -> tuple[str | None, str | None]:
     """Return (doi, arxiv_id) from the Highwire/Dublin Core meta tags of a landing page."""
+    from bs4 import BeautifulSoup  # only needed for this fallback; slow to import
+
     soup = BeautifulSoup(html, "html.parser")
     doi = arxiv = None
     for name in ("citation_doi", "dc.identifier", "DC.identifier", "prism.doi", "doi", "DOI"):
@@ -94,6 +98,7 @@ def doi_from_html(html: str) -> tuple[str | None, str | None]:
 
 
 def resolve(target: str, client: httpx.Client) -> Paper:
+    """Identify the paper behind a URL, DOI or arXiv ID (fetching the page only as a last resort)."""
     target = target.strip()
 
     # Bare identifiers.
@@ -101,10 +106,10 @@ def resolve(target: str, client: httpx.Client) -> Paper:
         return Paper(doi=clean_doi(target[4:]))
     if target.lower().startswith("arxiv:"):
         target = target[6:]
-    if re.fullmatch(DOI_RE, target):
+    if DOI_RE.fullmatch(target):
         return Paper(doi=clean_doi(target))
-    if re.fullmatch(ARXIV_ID_RE, target):
-        return Paper(arxiv_id=ARXIV_ID_RE.fullmatch(target).group("id"))
+    if m := ARXIV_ID_RE.fullmatch(target):
+        return Paper(arxiv_id=m.group("id"))
 
     if "://" not in target and "." not in target.split("/")[0]:
         raise LookupError("not a URL, DOI or arXiv ID")

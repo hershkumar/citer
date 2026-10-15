@@ -16,7 +16,7 @@ function M.check()
     health.error("telescope.nvim not found", { "Install nvim-telescope/telescope.nvim" })
   end
 
-  local cmd = require("citer").config.cmd
+  local cmd = require("citer.config").options.cmd
   if vim.fn.executable(cmd) == 1 then
     health.ok(("`%s` found at %s"):format(cmd, vim.fn.exepath(cmd)))
   else

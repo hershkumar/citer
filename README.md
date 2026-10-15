@@ -1,6 +1,15 @@
 # citer
 
-Fetch BibTeX for a paper from the publisher's (or arXiv's) own export endpoint.
+> [!WARNING]
+> This project (both the CLI and the Neovim plugin) is fully vibecoded: it was written by an
+> AI assistant with minimal human review. Use it at your own risk, and keep your `.bib` files
+> under version control or backed up, since the tool writes to them.
+
+Fetch BibTeX for a paper from the publisher's (or arXiv's) own export endpoint, and pick
+citations from your `.bib` files in Neovim.
+
+Install the CLI with `uv tool install .` (or see [Neovim plugin](#neovim-plugin), which
+installs both).
 
 ```sh
 uv run citer https://journals.aps.org/prxquantum/abstract/10.1103/PRXQuantum.4.027001
@@ -79,3 +88,36 @@ require('citer').setup({
   keymaps = { pick = "<leader>ci", add = "<leader>ca", insert_pick = "<C-x>c", picker_add = "<C-a>" },
 })
 ```
+
+## Development
+
+```
+src/citer/            the CLI (Python)
+  resolve.py            URL / DOI / arXiv ID -> identifiers
+  exporters.py          one function per BibTeX source, and publisher routing
+  fetch.py              which exporters to try, run concurrently
+  bib.py                BibTeX parsing, duplicate detection, appending
+  cli.py                argument parsing, batch and interactive modes
+lua/citer/            the Neovim plugin
+  init.lua              setup, commands, keymaps, auto-open
+  config.lua            options
+  bib.lua               BibTeX parsing and duplicate detection (mirrors bib.py)
+  files.lua             finding, caching and appending to .bib files
+  cursor.lua            \cite{} context and key insertion
+  picker.lua            Telescope picker
+  add.lua               fetching papers via the CLI
+  duplicates.lua        :CiterDuplicates
+plugin/citer.lua      auto-setup;  doc/citer.txt  :help citer
+tests/                pytest suite;  tests/nvim/run.lua  plugin tests
+```
+
+```sh
+uv run pytest                          # offline tests
+CITER_NETWORK=1 uv run pytest          # also hit the live endpoints
+nvim --headless --clean -c "luafile tests/nvim/run.lua"
+# include the picker tests by putting Telescope on the runtimepath:
+CITER_TEST_RTP=~/.vim/plugged/plenary.nvim,~/.vim/plugged/telescope.nvim \
+  nvim --headless --clean -c "luafile tests/nvim/run.lua"
+```
+
+`bib.py` and `bib.lua` implement the same parsing and duplicate rules; change them together.
