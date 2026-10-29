@@ -9,6 +9,8 @@ CONTENTS                                                      *citer-contents*
   4. Commands ............................................ |citer-commands|
   5. Configuration ....................................... |citer-config|
   6. Duplicates .......................................... |citer-duplicates|
+  7. References .......................................... |citer-refs|
+  8. Graphics ............................................ |citer-graphics|
 
 ==============================================================================
 1. INTRODUCTION                                                  *citer-intro*
@@ -18,6 +20,10 @@ editing (and in the vimtex project root) using a Telescope fuzzy finder over
 key, authors, title and year. Papers that aren't there yet can be fetched by
 URL, DOI or arXiv ID with the `citer` command-line tool, which downloads
 BibTeX from the publisher's or arXiv's own export endpoint.
+
+It also picks `\ref{}` targets from the `\label{}`s in the project's .tex
+files (see |citer-refs|), and `\includegraphics{}` paths from the project's
+image files, with a preview of each (see |citer-graphics|).
 
 Requirements: Neovim 0.10+, telescope.nvim, and `citer` on $PATH.
 Run |:checkhealth| citer to verify.
@@ -45,13 +51,26 @@ In tex buffers:
   <leader>ci      (normal)  Open the picker.
   <leader>ca      (normal)  Fetch a paper by URL/DOI/arXiv ID and add it.
 
+  Typing `\ref{`, `\eqref{`, `\cref{`, `\autoref{`, ... opens the label
+  picker (|citer-refs|), as does a `,` inside a command that takes a list
+  (`\cref`, `\Cref`, `\cpageref`, ...).
+
+  <C-x>r          (insert)  Open the label picker.
+  <leader>cr      (normal)  Open the label picker.
+
+  Typing `\includegraphics{` or `\includegraphics[...]{` opens the graphics
+  picker (|citer-graphics|).
+
+  <C-x>g          (insert)  Open the graphics picker.
+  <leader>cg      (normal)  Open the graphics picker.
+
 In the picker:
 
   <CR>            Insert the selected key(s). Outside a cite command the keys
-                  are wrapped in `\cite{}`.
+                  are wrapped in `\cite{}` (labels: in `ref_command`).
   <C-j>, <C-k>    Move down / up.
   <Tab>           Toggle multi-selection.
-  <C-a>           Fetch a paper that isn't in the .bib yet, add it, and insert
+  <C-a>           (citations) Fetch a paper that isn't in the .bib yet, add it, and insert
                   its key.
   <Esc>, <C-c>    Close and return to where you were.
 
@@ -60,6 +79,12 @@ In the picker:
 
 :CiterPick                                                        *:CiterPick*
     Open the citation picker.
+
+:CiterRef                                                          *:CiterRef*
+    Open the label picker.
+
+:CiterGraphics                                                *:CiterGraphics*
+    Open the graphics picker.
 
 :CiterAdd [{target} ...]                                           *:CiterAdd*
     Fetch BibTeX for each URL, DOI or arXiv ID with `citer` and append it to
@@ -79,12 +104,25 @@ Defaults: >lua
     args = {},                -- extra arguments, e.g. { "--published" }
     bib_file = nil,           -- always add to this file (relative to root)
     default_bib = "references.bib",  -- suggested name if there is no .bib
-    auto_open = true,         -- open the picker on `\cite{` and `,`
+    auto_open = true,         -- open a picker on `\cite{`, `\ref{`,
+                              -- `\includegraphics{` and `,`
+    ref_command = "ref",      -- wraps labels picked outside a \ref-like
+                              -- command, e.g. "cref", "autoref"
+    graphics = {
+      preview = "auto",       -- "kitty", "chafa", or false (file info)
+      extensions = { "pdf", "png", "jpg", "jpeg", "eps", "svg" },
+      depth = 5,              -- how deep to search below the project root
+      max_files = 5000,
+    },
     keymaps = {
       pick = "<leader>ci",
       add = "<leader>ca",
       insert_pick = "<C-x>c",
       picker_add = "<C-a>",
+      ref_pick = "<leader>cr",
+      insert_ref_pick = "<C-x>r",
+      graphics_pick = "<leader>cg",
+      insert_graphics_pick = "<C-x>g",
     },
   })
 <
@@ -108,5 +146,59 @@ the file counts as a duplicate when its title or DOI matches.
 
 If a different paper already uses the same key, the new entry's key gets a
 suffix: `Smith2020a`, `Smith2020b`, ...
+
+==============================================================================
+7. REFERENCES                                                    *citer-refs*
+
+The label picker lists every `\label{}` in:
+
+  - the current buffer, including unsaved changes,
+  - the other `*.tex` files in its directory and the vimtex root,
+  - vimtex's list of project source files, if vimtex is active,
+  - files reached through `\input{}`, `\include{}` and `\subfile{}`.
+
+Other loaded buffers are read instead of their files, so unsaved labels show
+up there too. Commented-out labels are skipped.
+
+Each label is shown with what it's attached to (its environment, such as
+`equation`, `align`, `figure`, `theorem`, or the sectioning command before
+it) and a description: the caption, the section title, the theorem's
+optional name, or the equation row the label is on.
+
+Picked labels are inserted into the reference command under the cursor.
+Commands that take one key (`\ref`, `\eqref`, `\autoref`, ...) get the first
+selected label; `\cref`-style commands get all of them. Outside a reference
+command the labels are wrapped in `ref_command`: `\ref{a}, \ref{b}`, or
+`\cref{a,b}` when it takes a list.
+
+==============================================================================
+8. GRAPHICS                                                  *citer-graphics*
+
+The graphics picker lists the image files (see `graphics.extensions`) under
+the project root (the vimtex root, or the file's directory) and the
+directories named in `\graphicspath{}`, up to `graphics.depth` levels deep.
+Hidden directories, `node_modules` and `_minted*` are skipped, as is a PDF
+next to a .tex file of the same name (the compiled document).
+
+Files are listed in tree order, with the directory dimmed and the file name
+highlighted, and fuzzy-matched on their path. `●` marks files already used
+in an `\includegraphics{}` in the buffer (or the vimtex main file).
+
+The picked path is relative to the `\graphicspath{}` entry it's under, or to
+the project root. Inside `\includegraphics{...}` it replaces what's in the
+braces (text already typed there prefills the prompt); elsewhere it's
+wrapped in `\includegraphics{}`.
+
+Previews show the file's path, pixel size, size and date, and the image:
+
+  kitty   Drawn over the preview window with the Kitty graphics protocol, in
+          kitty, Ghostty and WezTerm (detected from $TERM, $TERM_PROGRAM and
+          $KITTY_WINDOW_ID; not inside tmux).
+  chafa   Rendered as coloured text with `chafa`, in any other terminal.
+
+Formats other than PNG are converted to PNG thumbnails, cached under
+`stdpath("cache")/citer/thumbs`, with the first available of: `pdftoppm`
+or `mutool` (PDF), `rsvg-convert` (SVG), ImageMagick `magick`, or `sips`
+(macOS). |:checkhealth| citer shows which are found.
 
  vim:tw=78:ts=8:ft=help:norl:

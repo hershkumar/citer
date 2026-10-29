@@ -6,7 +6,8 @@
 > under version control or backed up, since the tool writes to them.
 
 Fetch BibTeX for a paper from the publisher's (or arXiv's) own export endpoint, and pick
-citations from your `.bib` files in Neovim.
+citations from your `.bib` files (and `\ref{}` targets from your `\label{}`s, and
+`\includegraphics{}` paths from your image files, with previews) in Neovim.
 
 Install the CLI with `uv tool install .` (or see [Neovim plugin](#neovim-plugin), which
 installs both).
@@ -28,6 +29,10 @@ Interactive mode writes to `-o`, or the only `*.bib` in the current directory, o
 `references.bib`. Quit with Ctrl-D or `quit`.
 
 Accepts URLs (abstract or PDF pages), bare DOIs, `doi:`/`arXiv:` prefixes, and arXiv IDs.
+AIP (`pubs.aip.org`) article URLs contain no DOI and their pages are behind Cloudflare, so
+the DOI is looked up in Crossref from the volume, page and title in the URL.
+ScienceDirect (`sciencedirect.com/.../pii/<PII>`) URLs are likewise blocked; their PII is
+looked up in Crossref, where Elsevier registers it alongside the DOI.
 The source used for each entry is printed to stderr.
 
 ## Sources (`--source`)
@@ -67,10 +72,31 @@ In `tex` buffers:
 | in picker: `<C-a>` | fetch a paper with `citer`, add it to the `.bib`, insert its key |
 | `<leader>ca`, `:CiterAdd [url ...]` | fetch and add to the `.bib` (key is reported, not inserted) |
 | `:CiterDuplicates` | quickfix list of duplicate entries across the project's `.bib` files |
+| type `\ref{` (also `\eqref{`, `\cref{`, `\autoref{`, ...), or `,` inside `\cref{` | label picker opens automatically |
+| `<C-x>r` (insert), `<leader>cr` (normal), `:CiterRef` | open the label picker |
+| type `\includegraphics{` (also `\includegraphics[..]{`) | graphics picker opens automatically |
+| `<C-x>g` (insert), `<leader>cg` (normal), `:CiterGraphics` | open the graphics picker |
 
 The picker fuzzy-searches key, authors, title and year across every `*.bib` file in the
 file's directory (and the vimtex project root). New entries go into the single `.bib`
 there, or the one named in `\bibliography{}`/`\addbibresource{}`, or you're asked.
+
+The label picker lists every `\label{}` in the buffer (including unsaved changes), the other
+`*.tex` files in those directories, vimtex's source list, and files reached through
+`\input{}`, `\include{}` and `\subfile{}`. Each label is shown with what it's attached to
+(`equation`, `figure`, `section`, ...) and a description: the caption, section title,
+theorem name, or the equation row. Outside a reference command, picked labels are wrapped
+in `\ref{}` (see `ref_command`); `\cref{}`-style commands take several at once.
+
+The graphics picker fuzzy-searches the paths of image files (`pdf`, `png`, `jpg`, `jpeg`,
+`eps`, `svg`) under the project root and the `\graphicspath{}` directories, listed in tree
+order with the directory dimmed and the file name highlighted; `●` marks ones already used
+in the buffer. Paths are inserted relative to the `\graphicspath{}` entry they're in, or the
+project root. A PDF next to a `.tex` of the same name (the compiled document) is left out.
+The preview shows the image itself in kitty, Ghostty or WezTerm (Kitty graphics protocol;
+not inside tmux), or as text art with `chafa` elsewhere. PDFs, JPEGs, SVGs and EPS files
+are converted to cached PNG thumbnails with `pdftoppm`/`mutool`, `rsvg-convert`,
+ImageMagick, or `sips` (macOS), whichever is installed.
 
 Before adding, each fetched entry is checked against the existing entries by DOI, arXiv ID
 and normalized title. If it's already there, nothing is written and the existing key is
@@ -84,8 +110,19 @@ require('citer').setup({
   args = {},               -- e.g. { "--published" } to prefer journal versions of arXiv links
   bib_file = nil,          -- always write to this file instead of choosing
   default_bib = "references.bib",
-  auto_open = true,
-  keymaps = { pick = "<leader>ci", add = "<leader>ca", insert_pick = "<C-x>c", picker_add = "<C-a>" },
+  auto_open = true,        -- for \cite{, \ref{ and \includegraphics{
+  ref_command = "ref",     -- wraps labels picked outside a reference command, e.g. "cref"
+  graphics = {
+    preview = "auto",      -- "kitty", "chafa", or false for file info only
+    extensions = { "pdf", "png", "jpg", "jpeg", "eps", "svg" },
+    depth = 5,             -- how deep to search below the project root
+    max_files = 5000,
+  },
+  keymaps = {
+    pick = "<leader>ci", add = "<leader>ca", insert_pick = "<C-x>c", picker_add = "<C-a>",
+    ref_pick = "<leader>cr", insert_ref_pick = "<C-x>r",
+    graphics_pick = "<leader>cg", insert_graphics_pick = "<C-x>g",
+  },
 })
 ```
 
@@ -103,8 +140,10 @@ lua/citer/            the Neovim plugin
   config.lua            options
   bib.lua               BibTeX parsing and duplicate detection (mirrors bib.py)
   files.lua             finding, caching and appending to .bib files
-  cursor.lua            \cite{} context and key insertion
-  picker.lua            Telescope picker
+  labels.lua            finding and describing \label{}s in the project's .tex files
+  graphics.lua          finding image files, PNG thumbnails, Kitty/chafa previews
+  cursor.lua            \cite{}/\ref{}/\includegraphics{} context and insertion
+  picker.lua            Telescope pickers (citations, labels, graphics)
   add.lua               fetching papers via the CLI
   duplicates.lua        :CiterDuplicates
 plugin/citer.lua      auto-setup;  doc/citer.txt  :help citer

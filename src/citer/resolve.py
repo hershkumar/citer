@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from urllib.parse import unquote, urlparse
 
@@ -27,6 +28,20 @@ SLUG_DOI_PREFIX = {
     "nature.com": "10.1038",
     "www.nature.com": "10.1038",
 }
+
+# Silverchair hosts (/<org>/<journal>/article/<volume>/<issue>/<page>/<id>/<title-slug>) have
+# no DOI in their URLs and block page fetches with Cloudflare, so they're looked up in Crossref.
+SILVERCHAIR_DOI_PREFIX = {
+    "pubs.aip.org": "10.1063",
+}
+SILVERCHAIR_PATH_RE = re.compile(
+    r"/[^/]+/[^/]+/article(?:-abstract)?/(?P<volume>[^/]+)/[^/]+/(?P<page>[^/]+)/\d+(?:/(?P<slug>[^/]+))?"
+)
+
+# Elsevier URLs (sciencedirect.com/science/article/[abs/]pii/<PII>) carry a PII instead of a
+# DOI and block page fetches; Elsevier deposits the PII in Crossref as an alternative ID.
+PII_HOSTS = {"www.sciencedirect.com", "sciencedirect.com", "linkinghub.elsevier.com"}
+PII_PATH_RE = re.compile(r"/pii/(?P<pii>S?[0-9X]{16})(?:[/?#]|$)", re.IGNORECASE)
 
 
 @dataclass
@@ -78,6 +93,54 @@ def doi_from_url(url: str) -> str | None:
     return None
 
 
+def crossref_items(client: httpx.Client, params: dict) -> list[dict]:
+    """Items from a Crossref works query, retrying briefly when rate-limited (HTTP 429)."""
+    for delay in (1, 2, 4, None):
+        resp = client.get("https://api.crossref.org/works", params=params)
+        if resp.status_code != 429 or delay is None:
+            break
+        time.sleep(delay)
+    if resp.status_code == 429:
+        raise LookupError("Crossref is rate-limiting requests; try again in a few seconds")
+    if resp.status_code != 200:
+        return []
+    return resp.json()["message"]["items"]
+
+
+def doi_from_pii(url: str, client: httpx.Client) -> str | None:
+    """DOI of an Elsevier article URL, found in Crossref by the PII in its path."""
+    parsed = urlparse(url)
+    m = PII_PATH_RE.search(parsed.path)
+    if parsed.netloc.lower() not in PII_HOSTS or not m:
+        return None
+    items = crossref_items(client, {"filter": f"alternative-id:{m['pii'].upper()}", "rows": 1, "select": "DOI"})
+    return items[0]["DOI"] if items else None
+
+
+def doi_from_crossref(url: str, client: httpx.Client) -> str | None:
+    """DOI of a Silverchair article URL, found in Crossref by volume, first page and title slug."""
+    parsed = urlparse(url)
+    prefix = SILVERCHAIR_DOI_PREFIX.get(parsed.netloc.lower())
+    m = SILVERCHAIR_PATH_RE.match(parsed.path)
+    if not prefix or not m:
+        return None
+    slug = unquote(m["slug"] or "").replace("-", " ")
+    items = crossref_items(
+        client,
+        {
+            "filter": f"prefix:{prefix}",
+            "query.bibliographic": f"{slug} {m['volume']} {m['page']}".strip(),
+            "rows": 20,
+            "select": "DOI,volume,page,article-number",
+        },
+    )
+    for item in items:
+        first_page = item.get("page", "").split("-")[0]
+        if item.get("volume") == m["volume"] and m["page"] in (item.get("article-number"), first_page):
+            return item["DOI"]
+    return None
+
+
 def doi_from_html(html: str) -> tuple[str | None, str | None]:
     """Return (doi, arxiv_id) from the Highwire/Dublin Core meta tags of a landing page."""
     from bs4 import BeautifulSoup  # only needed for this fallback; slow to import
@@ -126,7 +189,7 @@ def resolve(target: str, client: httpx.Client) -> Paper:
         return paper
 
     paper.landing_url = url
-    if doi := doi_from_url(url):
+    if doi := doi_from_url(url) or doi_from_pii(url, client) or doi_from_crossref(url, client):
         paper.doi = doi
         return paper
 

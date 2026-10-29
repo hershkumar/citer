@@ -85,6 +85,11 @@ network = pytest.mark.skipif(not os.environ.get("CITER_NETWORK"), reason="set CI
         ("10.1103/PhysRevB.98.045131", "aps"),
         ("https://www.nature.com/articles/s42254-023-00599-8", "springer"),
         ("https://www.science.org/doi/10.1126/science.1217069", "doi"),
+        (
+            "https://pubs.aip.org/aip/jmp/article/48/10/102111/379272/Bounds-for-the-adiabatic-approximation-with",
+            "doi",
+        ),
+        ("https://www.sciencedirect.com/science/article/pii/S0146641022000497", "doi"),
     ],
 )
 def test_live_endpoints(target, via):

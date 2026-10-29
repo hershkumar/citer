@@ -1,6 +1,6 @@
 import pytest
 
-from citer.resolve import clean_doi, doi_from_html, doi_from_url, resolve
+from citer.resolve import clean_doi, doi_from_crossref, doi_from_html, doi_from_pii, doi_from_url, resolve
 
 
 class NoNetwork:
@@ -64,3 +64,78 @@ def test_doi_from_url_query():
 def test_doi_from_html_meta_tags():
     html = '<meta name="citation_doi" content="doi:10.1038/nature14539"><meta name="citation_arxiv_id" content="1234.5678">'
     assert doi_from_html(html) == ("10.1038/nature14539", "1234.5678")
+
+
+class FakeCrossref:
+    """Answers a Crossref works query with a fixed item list, recording the request."""
+
+    def __init__(self, items):
+        self.items, self.params = items, None
+
+    def get(self, url, params=None, **kwargs):
+        assert url == "https://api.crossref.org/works"
+        self.params = params
+        items = self.items
+
+        class Response:
+            status_code = 200
+
+            def json(self):
+                return {"message": {"items": items}}
+
+        return Response()
+
+
+AIP_URL = "https://pubs.aip.org/aip/jmp/article/48/10/102111/379272/Bounds-for-the-adiabatic-approximation-with"
+
+
+def test_aip_doi_from_crossref_matches_volume_and_page():
+    client = FakeCrossref(
+        [
+            {"DOI": "10.1063/1.2757170", "volume": "127", "article-number": "094103"},
+            {"DOI": "10.1063/1.2798382", "volume": "48", "article-number": "102111"},
+        ]
+    )
+    assert resolve(AIP_URL, client).doi == "10.1063/1.2798382"
+    assert client.params["filter"] == "prefix:10.1063"
+    assert client.params["query.bibliographic"] == "Bounds for the adiabatic approximation with 48 102111"
+
+
+def test_aip_doi_from_crossref_rejects_mismatches():
+    client = FakeCrossref([{"DOI": "10.1063/1.2757170", "volume": "127", "page": "102111-102120"}])
+    assert doi_from_crossref(AIP_URL, client) is None
+    assert doi_from_crossref("https://example.org/aip/jmp/article/48/10/102111/379272/x", NoNetwork()) is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.sciencedirect.com/science/article/pii/S0146641022000497",
+        "https://www.sciencedirect.com/science/article/abs/pii/S0146641022000497?via%3Dihub",
+        "https://www.sciencedirect.com/science/article/pii/S0146641022000497/pdfft?isDTMRedir=true",
+        "https://linkinghub.elsevier.com/retrieve/pii/s0146641022000497",
+    ],
+)
+def test_elsevier_doi_from_pii(url):
+    client = FakeCrossref([{"DOI": "10.1016/j.ppnp.2022.103991"}])
+    assert resolve(url, client).doi == "10.1016/j.ppnp.2022.103991"
+    assert client.params["filter"] == "alternative-id:S0146641022000497"
+
+
+def test_elsevier_pii_needs_known_host():
+    assert doi_from_pii("https://example.org/pii/S0146641022000497", NoNetwork()) is None
+    assert doi_from_pii("https://www.sciencedirect.com/journal/progress-in-particle-and-nuclear-physics", NoNetwork()) is None
+
+
+def test_crossref_rate_limit_is_reported(monkeypatch):
+    monkeypatch.setattr("citer.resolve.time.sleep", lambda s: None)
+
+    class RateLimited:
+        status_code = 429
+
+    class Client:
+        def get(self, *args, **kwargs):
+            return RateLimited()
+
+    with pytest.raises(LookupError, match="rate-limiting"):
+        doi_from_pii("https://www.sciencedirect.com/science/article/pii/S0146641022000497", Client())

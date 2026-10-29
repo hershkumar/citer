@@ -14,6 +14,7 @@ vim.g.tex_flavor = "latex" -- empty .tex files are otherwise detected as plainte
 
 local bib = require("citer.bib")
 local cursor = require("citer.cursor")
+local labels = require("citer.labels")
 
 local passed, failed = 0, 0
 local function test(name, fn)
@@ -175,6 +176,157 @@ test("insert_keys wraps, appends and skips keys already cited", function()
   eq(vim.api.nvim_get_current_line(), "See \\cite{a,b}")
 end)
 
+test("context tells citations from references", function()
+  eq({ cursor.context("\\eqref{") }, { "ref", "", false })
+  eq({ cursor.context("see \\cref{a,") }, { "ref", "a,", true })
+  eq({ cursor.context("\\citep[p.~3]{a") }, { "cite", "a", true })
+  eq(cursor.context("\\href{"), nil)
+  eq(cursor.context("\\hyperref[sec:x]{"), nil)
+  eq(cursor.cite_context("\\ref{"), nil)
+end)
+
+test("insert_keys for references", function()
+  local pos = buffer_with("Eq. ")
+  pos.col = 4
+  cursor.insert_keys(pos, { "eq:a", "eq:b" }, "ref")
+  eq(vim.api.nvim_get_current_line(), "Eq. \\ref{eq:a}, \\ref{eq:b}")
+
+  pos = buffer_with("Eq. \\eqref{}")
+  pos.col = 11
+  cursor.insert_keys(pos, { "eq:a", "eq:b" }, "ref") -- \eqref takes one key
+  eq(vim.api.nvim_get_current_line(), "Eq. \\eqref{eq:a}")
+
+  pos = buffer_with("Figs. \\cref{fig:a}")
+  pos.col = 17
+  cursor.insert_keys(pos, { "fig:a", "fig:b" }, "ref")
+  eq(vim.api.nvim_get_current_line(), "Figs. \\cref{fig:a,fig:b}")
+
+  require("citer.config").set({ ref_command = "cref" })
+  pos = buffer_with("See ")
+  pos.col = 4
+  cursor.insert_keys(pos, { "a", "b" }, "ref")
+  eq(vim.api.nvim_get_current_line(), "See \\cref{a,b}")
+  require("citer.config").set({})
+end)
+
+-- labels ---------------------------------------------------------------------
+
+local TEX = [[
+\documentclass{article}
+\begin{document}
+\section{Intro}\label{sec:intro}
+Text with 50\% \label{par:x} % \label{commented}
+\begin{equation}
+  \label{eq:energy}
+  E = mc^2
+\end{equation}
+\begin{align}
+  a &= b \label{eq:ab} \\
+  c &= d \nonumber \\
+  e &= f \label{eq:ef}
+\end{align}
+\begin{figure}[htbp]
+  \centering
+  \caption{A \emph{nice}
+    plot}
+  \label{fig:plot}
+\end{figure}
+\begin{table}\caption{Data\label{tab:data}}\end{table}
+\begin{theorem}[Main result]\label{thm:main}
+\end{theorem}
+\input{chapters/two}
+\end{document}
+]]
+
+test("parse labels with their kind and context", function()
+  local ls, includes = labels.parse(TEX)
+  local got = vim.tbl_map(function(l)
+    return { l.key, l.line, l.kind, l.context }
+  end, ls)
+  eq(got, {
+    { "sec:intro", 3, "section", "Intro" },
+    { "par:x", 4, "section", "Intro" },
+    { "eq:energy", 6, "equation", "E = mc^2" },
+    { "eq:ab", 10, "align", "a = b" },
+    { "eq:ef", 12, "align", "e = f" },
+    { "fig:plot", 18, "figure", "A nice plot" },
+    { "tab:data", 20, "table", "Data" },
+    { "thm:main", 21, "theorem", "Main result" },
+  })
+  eq(includes, { "chapters/two" })
+end)
+
+test("load_all follows \\input and sees unsaved buffer text", function()
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir .. "/chapters", "p")
+  vim.fn.writefile(vim.split(TEX, "\n"), dir .. "/main.tex")
+  vim.fn.writefile({ "\\section{Two}\\label{sec:two}" }, dir .. "/chapters/two.tex")
+  vim.cmd("edit " .. dir .. "/main.tex")
+  vim.api.nvim_buf_set_lines(0, 0, 0, false, { "\\label{new:unsaved}" })
+  local keys = vim.tbl_map(function(l)
+    return l.key
+  end, labels.load_all(0))
+  eq(keys[1], "new:unsaved")
+  eq(keys[#keys], "sec:two")
+  eq(#keys, 10)
+  vim.cmd("bwipeout!")
+end)
+
+-- graphics -------------------------------------------------------------------
+
+local graphics = require("citer.graphics")
+
+-- A 3x2 PNG (header only; enough for png_size and for the picker).
+local PNG = "\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\3\0\0\0\2\8\2\0\0\0"
+local function write_bytes(path, bytes)
+  vim.fn.mkdir(vim.fs.dirname(path), "p")
+  local f = assert(io.open(path, "wb"))
+  f:write(bytes)
+  f:close()
+end
+
+local function graphics_project()
+  local dir = vim.fn.tempname()
+  for _, f in ipairs({ "figs/loss.png", "figs/sub/acc.pdf", "plots/b.jpg", "main.pdf", ".git/x.png", "notes.txt" }) do
+    write_bytes(dir .. "/" .. f, PNG)
+  end
+  vim.fn.writefile({
+    "\\graphicspath{{figs/}}",
+    "\\includegraphics[width=\\linewidth]{loss}",
+  }, dir .. "/main.tex")
+  return dir
+end
+
+test("context and insert_path for \\includegraphics", function()
+  eq({ cursor.context("\\includegraphics[width=0.5\\linewidth]{fi") }, { "graphics", "fi", false })
+  local pos = buffer_with("\\includegraphics{fi}")
+  pos.col = 19
+  cursor.insert_keys(pos, { "figs/a.pdf" }, "graphics")
+  eq(vim.api.nvim_get_current_line(), "\\includegraphics{figs/a.pdf}")
+
+  pos = buffer_with("  ")
+  pos.col = 2
+  cursor.insert_keys(pos, { "a.png", "b.png" }, "graphics")
+  eq(vim.api.nvim_get_current_line(), "  \\includegraphics{a.png}")
+end)
+
+test("graphics.find lists images in tree order, relative to \\graphicspath", function()
+  local dir = graphics_project()
+  vim.cmd("edit " .. dir .. "/main.tex")
+  local got = vim.tbl_map(function(img)
+    return { img.key, img.rel, img.used }
+  end, graphics.find(0))
+  -- main.pdf is the compiled document; .git and non-images are skipped.
+  eq(got, {
+    { "loss.png", "figs/loss.png", true },
+    { "sub/acc.pdf", "figs/sub/acc.pdf", false },
+    { "plots/b.jpg", "plots/b.jpg", false },
+  })
+  eq(graphics.png_size(dir .. "/figs/loss.png"), { 3, 2 })
+  eq(graphics.graphicspath("\\graphicspath{ {a/} {../b/} }"), { "a/", "../b/" })
+  vim.cmd("bwipeout!")
+end)
+
 -- add (with a stand-in for the citer CLI) --------------------------------------
 
 test("add appends new entries, skips duplicates and inserts keys", function()
@@ -219,6 +371,21 @@ test("add appends new entries, skips duplicates and inserts keys", function()
   local msg = notes[#notes]
   assert(msg:find("added PhysRevB.98.045131") and msg:find("already have LeCun2015") and msg:find("error: bogus"), msg)
   require("citer.config").set({})
+end)
+
+-- setup -----------------------------------------------------------------------
+
+test("re-firing FileType doesn't stack auto-open handlers", function()
+  require("citer").setup({})
+  vim.cmd("edit " .. vim.fn.tempname() .. ".tex")
+  local function handlers()
+    return #vim.api.nvim_get_autocmds({ group = "citer", event = "TextChangedI", buffer = 0 })
+  end
+  eq(handlers(), 1)
+  -- What a plugin manager does when it lazy-loads a plugin that has ftdetect files.
+  vim.cmd("doautocmd FileType")
+  vim.cmd("doautocmd FileType")
+  eq(handlers(), 1)
 end)
 
 -- picker (needs Telescope) ------------------------------------------------------
@@ -274,6 +441,50 @@ if pcall(require, "telescope") then
       return not in_picker()
     end)
     eq(vim.api.nvim_get_current_line(), "See \\cite{LeCun2015,")
+    eq(vim.fn.mode(), "i")
+    keys("<Esc>")
+  end)
+
+  async_test("ref picker opens on \\eqref{ and inserts the label", function()
+    require("citer").setup({})
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    vim.fn.writefile(vim.split(TEX, "\n"), dir .. "/main.tex")
+    vim.cmd("edit " .. dir .. "/main.tex")
+    vim.api.nvim_buf_set_lines(0, -1, -1, false, { "By " })
+
+    keys("GA\\eqref{")
+    await(in_picker)
+    keys("energy")
+    await(function()
+      return selected() == "eq:energy"
+    end)
+    keys("<CR>")
+    await(function()
+      return not in_picker() and vim.api.nvim_get_current_line():find("energy")
+    end)
+    eq(vim.api.nvim_get_current_line(), "By \\eqref{eq:energy")
+    eq(vim.fn.mode(), "i")
+    keys("<Esc>")
+  end)
+
+  async_test("graphics picker opens on \\includegraphics{ and inserts the path", function()
+    require("citer").setup({})
+    local dir = graphics_project()
+    vim.cmd("edit " .. dir .. "/main.tex")
+    vim.api.nvim_buf_set_lines(0, -1, -1, false, { "" })
+
+    keys("GA\\includegraphics[width=3cm]{")
+    await(in_picker)
+    keys("acc")
+    await(function()
+      return selected() == "sub/acc.pdf"
+    end)
+    keys("<CR>")
+    await(function()
+      return not in_picker() and vim.api.nvim_get_current_line():find("acc")
+    end)
+    eq(vim.api.nvim_get_current_line(), "\\includegraphics[width=3cm]{sub/acc.pdf")
     eq(vim.fn.mode(), "i")
     keys("<Esc>")
   end)
